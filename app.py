@@ -1,24 +1,3 @@
-import pandas as pd
-from flask import Flask, render_template_string, jsonify, request
-import os
-
-app = Flask(__name__)
-CSV_PATH = '旅遊景點.csv' 
-
-def load_data():
-    if not os.path.exists(CSV_PATH):
-        return pd.DataFrame()
-    df = pd.read_csv(CSV_PATH, encoding='utf-8-sig')
-    df['緯度'] = pd.to_numeric(df['緯度'], errors='coerce')
-    df['經度'] = pd.to_numeric(df['經度'], errors='coerce')
-    return df.dropna(subset=['緯度', '經度'])
-
-@app.route('/')
-def index():
-    df = load_data()
-    all_spots = df.to_dict(orient='records')
-    return render_template_string(HTML_TEMPLATE, spots=all_spots)
-
 HTML_TEMPLATE = r"""
 <!DOCTYPE html>
 <html>
@@ -28,92 +7,117 @@ HTML_TEMPLATE = r"""
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <style>
-        /* 調大基礎字體 */
-        body { margin: 0; display: flex; height: 100vh; font-family: "Microsoft JhengHei", sans-serif; font-size: 16px; }
+        body { margin: 0; display: flex; height: 100vh; font-family: "Microsoft JhengHei", sans-serif; overflow: hidden; }
         
-        /* 側邊欄寬度調整，並加大內距 */
-        #sidebar { width: 35%; min-width: 140px; background: #fff; border-right: 1px solid #ccc; display: flex; flex-direction: column; }
-        #header { padding: 10px; background: #2c3e50; color: white; }
-        #header h3 { margin: 0; font-size: 1.2rem; }
+        /* 側邊欄優化：增加滾動條與過渡動畫 */
+        #sidebar { 
+            width: 300px; 
+            background: #fff; 
+            border-right: 1px solid #ccc; 
+            display: flex; 
+            flex-direction: column; 
+            transition: transform 0.3s ease;
+            z-index: 1000;
+            flex-shrink: 0;
+        }
         
-        /* 加大清單字體與間距，方便手指點擊 */
-        .spot-card { padding: 15px 10px; border-bottom: 1px solid #eee; cursor: pointer; }
-        .spot-card h3 { margin: 0; font-size: 1.1rem; color: #d35400; }
-        .spot-card small { font-size: 0.9rem; color: #666; display: block; margin-top: 4px; }
-        
-        #spot-list { overflow-y: auto; flex-grow: 1; }
-        #map { flex-grow: 1; }
+        /* 當隱藏時位移 */
+        #sidebar.hidden { transform: translateX(-300px); margin-right: -300px; }
 
-        /* 加大路徑規劃面板的按鈕 */
-        .nav-panel { padding: 10px; background: #ecf0f1; border-top: 1px solid #ccc; font-size: 14px; }
-        .btn-nav { background: #3498db; color: white; padding: 12px; text-decoration: none; border-radius: 6px; 
-                   display: block; text-align: center; margin-top: 8px; font-weight: bold; font-size: 1rem; }
+        #header { padding: 15px; background: #2c3e50; color: white; flex-shrink: 0; }
         
-        /* Leaflet 標籤字體加大 */
-        .leaflet-tooltip { font-size: 14px !important; font-weight: bold; }
-        .leaflet-popup-content { font-size: 16px !important; line-height: 1.5; }
-        .leaflet-popup-content button { padding: 8px; font-size: 14px; width: 100%; margin-top: 5px; cursor: pointer; }
+        /* 景點列表：允許獨立上下捲動 */
+        #spot-list { 
+            overflow-y: auto; 
+            flex-grow: 1; 
+            -webkit-overflow-scrolling: touch; /* 優化手機滑動流暢度 */
+        }
+
+        .spot-card { padding: 12px; border-bottom: 1px solid #eee; cursor: pointer; }
+        .spot-card:hover { background: #f1f4f6; }
+        .spot-card h3 { margin: 0; font-size: 16px; color: #d35400; }
+        
+        #map { flex-grow: 1; height: 100%; position: relative; }
+
+        /* 收納按鈕設計 */
+        #toggle-btn {
+            position: absolute;
+            left: 10px;
+            top: 10px;
+            z-index: 1100;
+            background: white;
+            border: 2px solid rgba(0,0,0,0.2);
+            border-radius: 4px;
+            padding: 5px 10px;
+            cursor: pointer;
+            font-weight: bold;
+        }
+
+        .nav-panel { padding: 10px; background: #ecf0f1; border-top: 1px solid #ccc; font-size: 13px; flex-shrink: 0; }
+        .btn-nav { background: #3498db; color: white; padding: 8px; text-decoration: none; border-radius: 4px; display: block; text-align: center; margin-top: 5px; }
+        
+        /* 手機橫向微調 */
+        @media (max-height: 450px) {
+            #header { padding: 5px 15px; }
+            #header h3 { font-size: 16px; margin: 5px 0; }
+        }
     </style>
 </head>
 <body>
+
 <div id="sidebar">
     <div id="header">
-        <h3>京都景點</h3>
+        <h3>京都景點規劃</h3>
+        <small>點擊列表可捲動查看</small>
     </div>
     <div id="spot-list">
         {% for spot in spots %}
         <div class="spot-card" onclick="focusSpot('{{ spot.景點 }}')">
             <h3>{{ spot.景點 }}</h3>
-            <small>⭐{{ spot.評價 }} · {{ spot.分類 }}</small>
+            <small>{{ spot.城市 }} · ⭐{{ spot.評價 }}</small>
         </div>
         {% endfor %}
     </div>
     <div class="nav-panel" id="route-info">
-        <span id="start-name" style="color:#2980b9">起點未設</span> ➔ 
-        <span id="end-name" style="color:#c0392b">終點未設</span>
-        <a id="go-link" href="#" target="_blank" class="btn-nav" style="display:none;">開始導航</a>
+        <span id="start-name">未設定起點</span> → <span id="end-name">未設定終點</span>
+        <a id="go-link" href="#" target="_blank" class="btn-nav" style="display:none;">Google 導航</a>
     </div>
 </div>
-<div id="map"></div>
+
+<div id="map">
+    <button id="toggle-btn" onclick="toggleSidebar()">☰ 選單</button>
+</div>
+
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
-    var map = L.map('map', { zoomControl: false }).setView([35.0116, 135.7681], 13);
-    L.control.zoom({ position: 'topright' }).addTo(map); // 將縮放按鈕移到右邊，避免擋到側邊欄
+    var map = L.map('map').setView([35.0116, 135.7681], 13);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
 
     var allMarkers = {};
     var highlightLayer = L.layerGroup().addTo(map);
     var spotsData = {{ spots|tojson }};
-    var startPoint = null;
-    var endPoint = null;
-
-    // 自定義標記圖示：變大一點
-    var bigIcon = L.icon({
-        iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
-        shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
-        iconSize: [30, 46], // 原本是 [25, 41]
-        iconAnchor: [15, 46],
-        popupAnchor: [1, -34],
-        shadowSize: [46, 46]
-    });
+    
+    // 側邊欄切換功能
+    function toggleSidebar() {
+        document.getElementById('sidebar').classList.toggle('hidden');
+        setTimeout(() => { map.invalidateSize(); }, 300); // 重新計算地圖大小
+    }
 
     spotsData.forEach(function(spot) {
-        var marker = L.marker([spot.緯度, spot.經度], {icon: bigIcon}).addTo(map);
-        marker.bindTooltip(spot.景點, { direction: 'top', permanent: false });
+        var marker = L.marker([spot.緯度, spot.經度]).addTo(map);
+        marker.bindTooltip(spot.景點);
         
-        var popupContent = document.createElement('div');
-        popupContent.innerHTML = `
-            <div style="min-width:150px">
-                <strong style="font-size:1.2rem">${spot.景點}</strong><br>
-                <p style="margin:5px 0">${spot.景點說明 || ''}</p>
-                <button onclick="setRoute('start', '${spot.景點}', ${spot.緯度}, ${spot.經度})">設為起點 A</button>
-                <button onclick="setRoute('end', '${spot.景點}', ${spot.緯度}, ${spot.經度})">設為終點 B</button>
-            </div>
-        `;
+        var popupContent = `
+            <div style="width:150px">
+                <h4>${spot.景點}</h4>
+                <button onclick="setRoute('start', '${spot.景點}', ${spot.緯度}, ${spot.經度})">設為起點</button>
+                <button onclick="setRoute('end', '${spot.景點}', ${spot.緯度}, ${spot.經度})" style="margin-top:5px">設為終點</button>
+            </div>`;
         marker.bindPopup(popupContent);
         allMarkers[spot.景點] = marker;
     });
 
+    var startPoint = null, endPoint = null;
     function setRoute(type, name, lat, lon) {
         if (type === 'start') {
             startPoint = { name: name, pos: lat + ',' + lon };
@@ -135,17 +139,14 @@ HTML_TEMPLATE = r"""
         if (target) {
             highlightLayer.clearLayers();
             map.flyTo([target.緯度, target.經度], 16);
-            L.circle([target.緯度, target.經度], {
-                radius: 300, color: '#e74c3c', fillOpacity: 0.15, weight: 2
-            }).addTo(highlightLayer);
+            L.circle([target.緯度, target.經度], {radius: 500, color: '#e74c3c', fillOpacity: 0.1}).addTo(highlightLayer);
             allMarkers[spotName].openPopup();
+            
+            // 行動裝置點選後自動縮回選單 (可選)
+            if (window.innerWidth < 768) toggleSidebar();
         }
     }
 </script>
 </body>
 </html>
 """
-
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
