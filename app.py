@@ -1,202 +1,160 @@
 import pandas as pd
 from flask import Flask, render_template_string
 import os
+import json
 
 app = Flask(__name__)
 
-# --- 設定區 ---
-# 網頁版路徑：優先抓取程式同目錄下的檔案
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CSV_PATH = os.path.join(BASE_DIR, '旅遊景點.csv')
 
-def load_data():
+def load_structured_data():
     if not os.path.exists(CSV_PATH):
-        # 建立一個測試用的 DataFrame，避免程式崩潰
-        return pd.DataFrame(columns=['景點', '緯度', '經度', '評價'])
+        return {}
     
     df = pd.read_csv(CSV_PATH, encoding='utf-8-sig')
     df['緯度'] = pd.to_numeric(df['緯度'], errors='coerce')
     df['經度'] = pd.to_numeric(df['經度'], errors='coerce')
-    return df.dropna(subset=['緯度', '經度'])
+    df = df.dropna(subset=['緯度', '經度'])
+
+    # 建立三層結構：城市 -> 主要景點 -> 周邊
+    structured = {}
+    cities = df['城市'].unique()
+
+    for city in cities:
+        city_df = df[df['城市'] == city]
+        # 假設分類中有 "主要景點" 這個類別
+        main_spots = city_df[city_df['分類'] == '主要景點'].to_dict(orient='records')
+        
+        city_data = []
+        for main in main_spots:
+            # 這裡可以自定義邏輯：例如找尋距離主要景點 1km 內的作為周邊
+            # 簡單起見，我們先以相同城市的「非主要景點」作為該城市所有主要景點的共用周邊，或不分層
+            others = city_df[city_df['分類'] != '主要景點'].to_dict(orient='records')
+            main['sub_spots'] = others
+            city_data.append(main)
+        
+        structured[city] = city_data
+    
+    return structured, df.to_dict(orient='records')
 
 @app.route('/')
 def index():
-    df = load_data()
-    all_spots = df.to_dict(orient='records')
-    return render_template_string(HTML_TEMPLATE, spots=all_spots)
+    structured, all_raw = load_structured_data()
+    return render_template_string(HTML_TEMPLATE, structured=structured, all_raw=all_raw)
 
-# --- 完整 HTML/CSS/JS 模板 ---
 HTML_TEMPLATE = r"""
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Japan Travel Map</title>
+    <title>Japan Travel Map v2</title>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <style>
         body { margin: 0; display: flex; height: 100vh; font-family: "Microsoft JhengHei", sans-serif; overflow: hidden; }
         
-        /* 側邊欄樣式 */
+        /* 側邊欄優化：手機版寬度調整 */
         #sidebar { 
             width: 320px; 
             background: #fff; 
             box-shadow: 2px 0 10px rgba(0,0,0,0.1);
             display: flex; 
             flex-direction: column; 
-            transition: transform 0.3s ease, margin-right 0.3s ease;
+            transition: transform 0.3s ease;
             flex-shrink: 0;
             z-index: 1001;
         }
+
+        @media (max-width: 600px) {
+            #sidebar { width: 80vw; } /* 手機版只佔 80% 寬度 */
+            #sidebar.hidden { transform: translateX(-80vw); margin-right: -80vw; }
+        }
+
         #sidebar.hidden { transform: translateX(-320px); margin-right: -320px; }
 
-        #header { 
-            padding: 15px; 
-            background: #2c3e50; 
-            color: white; 
-            display: flex;
-            align-items: center;
-            flex-shrink: 0;
-        }
-
-        .hamburger-icon {
-            width: 18px; height: 2px; background: white; position: relative; display: inline-block;
-        }
-        .hamburger-icon::before, .hamburger-icon::after {
-            content: ""; width: 18px; height: 2px; background: white; position: absolute; left: 0;
-        }
-        .hamburger-icon::before { top: -6px; }
-        .hamburger-icon::after { top: 6px; }
-
-        #toggle-in {
-            background: none; border: none; cursor: pointer; padding: 10px; margin-right: 5px;
-            display: flex; align-items: center; justify-content: center;
-        }
+        #header { padding: 15px; background: #2c3e50; color: white; display: flex; align-items: center; }
+        
+        /* 層級選單樣式 */
+        .city-group { background: #f1f1f1; padding: 10px; font-weight: bold; cursor: pointer; border-bottom: 1px solid #ddd; }
+        .main-spot { padding: 12px 12px 12px 25px; border-bottom: 1px solid #eee; cursor: pointer; background: #fff; color: #d35400; font-weight: bold; }
+        .sub-spot { padding: 8px 8px 8px 45px; border-bottom: 1px solid #f9f9f9; cursor: pointer; font-size: 13px; color: #666; background: #fafafa; }
+        .sub-spot:hover { background: #eef; }
 
         #spot-list { overflow-y: auto; flex-grow: 1; }
-        .spot-card { padding: 16px; border-bottom: 1px solid #f1f1f1; cursor: pointer; transition: 0.2s; }
-        .spot-card:hover { background: #f8f9fa; border-left: 4px solid #3498db; }
-        .spot-card h3 { margin: 0 0 4px 0; font-size: 15px; color: #d35400; }
-        .spot-card div { font-size: 12px; color: #70757a; }
-        
         #map { flex-grow: 1; height: 100%; position: relative; z-index: 1; }
 
-        /* 地圖上的展開按鈕 */
         #toggle-out {
-            position: absolute; left: 12px; top: 12px; z-index: 1000;
-            background: #2c3e50; border: none;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
-            border-radius: 8px; width: 45px; height: 45px; 
-            cursor: pointer; display: none; 
-            align-items: center; justify-content: center;
+            position: absolute; left: 10px; top: 10px; z-index: 1000;
+            background: #2c3e50; color: white; border-radius: 50%; width: 40px; height: 40px; cursor: pointer;
+            display: none; align-items: center; justify-content: center; border: none;
         }
 
-        .nav-panel { padding: 12px; background: #fff; border-top: 1px solid #eee; flex-shrink: 0; }
-        .btn-nav { 
-            background: #3498db; color: white; padding: 10px; 
-            text-decoration: none; border-radius: 4px; display: block; 
-            text-align: center; margin-top: 10px; font-size: 14px; font-weight: bold;
-        }
+        .hamburger { width: 18px; height: 2px; background: white; position: relative; }
+        .hamburger::before, .hamburger::after { content: ""; width: 18px; height: 2px; background: white; position: absolute; left: 0; }
+        .hamburger::before { top: -6px; } .hamburger::after { top: 6px; }
     </style>
 </head>
 <body>
 
 <div id="sidebar">
     <div id="header">
-        <button id="toggle-in" onclick="toggleSidebar()">
-            <div class="hamburger-icon"></div>
+        <button onclick="toggleSidebar()" style="background:none; border:none; cursor:pointer; margin-right:10px;">
+            <div class="hamburger"></div>
         </button>
-        <span style="font-weight: bold; font-size: 16px;">京都行程 ({{ spots|length }})</span>
+        <span>行程導覽</span>
     </div>
     <div id="spot-list">
-        {% for spot in spots %}
-        <div class="spot-card" onclick="focusSpot('{{ spot.景點 }}')">
-            <h3>{{ spot.景點 }}</h3>
-            <div>評價：⭐{{ spot.評價 }}</div>
-        </div>
+        {% for city, main_spots in structured.items() %}
+            <div class="city-group">📍 {{ city }}</div>
+            {% for main in main_spots %}
+                <div class="main-spot" onclick="focusSpot('{{ main.景點 }}')">🏯 {{ main.景點 }} ({{ main.評價 }})</div>
+                {% for sub in main.sub_spots %}
+                    <div class="sub-spot" onclick="focusSpot('{{ sub.景點 }}')">└ {{ sub.景點 }}</div>
+                {% endfor %}
+            {% endfor %}
         {% endfor %}
-    </div>
-    <div class="nav-panel">
-        <div id="route-display" style="font-size:12px; color:#5f6368; display: none; margin-bottom:5px;">
-            <b style="color:#2980b9">A 起點:</b> <span id="start-name"></span><br>
-            <b style="color:#c0392b">B 終點:</b> <span id="end-name"></span>
-        </div>
-        <a id="go-link" href="#" target="_blank" class="btn-nav" style="display:none;">開啟 Google 地圖規劃</a>
     </div>
 </div>
 
 <div id="map">
-    <button id="toggle-out" onclick="toggleSidebar()">
-        <div class="hamburger-icon"></div>
-    </button>
+    <button id="toggle-out" onclick="toggleSidebar()"><div class="hamburger"></div></button>
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
-    var map = L.map('map', { zoomControl: false }).setView([35.0116, 135.7681], 13);
+    var map = L.map('map', { zoomControl: false }).setView([35.0116, 135.7681], 12);
     L.control.zoom({ position: 'bottomright' }).addTo(map);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
 
     var allMarkers = {};
-    var highlightLayer = L.layerGroup().addTo(map);
-    var spotsData = {{ spots|tojson }};
+    var allData = {{ all_raw|tojson }};
     
     function toggleSidebar() {
         var sb = document.getElementById('sidebar');
-        var btnOut = document.getElementById('toggle-out');
+        var btn = document.getElementById('toggle-out');
         if (sb.classList.contains('hidden')) {
             sb.classList.remove('hidden');
-            btnOut.style.display = 'none';
+            btn.style.display = 'none';
         } else {
             sb.classList.add('hidden');
-            btnOut.style.display = 'flex';
+            btn.style.display = 'flex';
         }
-        setTimeout(() => { map.invalidateSize(); }, 350);
+        setTimeout(() => map.invalidateSize(), 350);
     }
 
-    spotsData.forEach(function(spot) {
+    allData.forEach(function(spot) {
         var marker = L.marker([spot.緯度, spot.經度]).addTo(map);
-        var popupContent = `
-            <div style="width:150px">
-                <h4 style="margin:0 0 8px 0">${spot.景點}</h4>
-                <button onclick="setRoute('start', '${spot.景點}', ${spot.緯度}, ${spot.經度})" style="width:100%; cursor:pointer; margin-bottom:5px;">設為起點 A</button>
-                <button onclick="setRoute('end', '${spot.景點}', ${spot.緯度}, ${spot.經度})" style="width:100%; cursor:pointer;">設為終點 B</button>
-            </div>`;
-        marker.bindPopup(popupContent);
+        marker.bindPopup(`<b>${spot.景點}</b><br>${spot.景點說明 || ''}`);
         allMarkers[spot.景點] = marker;
     });
 
-    var startPoint = null, endPoint = null;
-    function setRoute(type, name, lat, lon) {
-        if (type === 'start') {
-            startPoint = { name: name, pos: lat + ',' + lon };
-            document.getElementById('start-name').innerText = name;
-        } else {
-            endPoint = { name: name, pos: lat + ',' + lon };
-            document.getElementById('end-name').innerText = name;
-        }
-        
-        if (startPoint || endPoint) document.getElementById('route-display').style.display = 'block';
-        
-        if (startPoint && endPoint) {
-            // 修正為 Google Maps 官方轉乘規劃格式
-            var url = `https://www.google.com/maps/dir/?api=1&origin=${startPoint.pos}&destination=${endPoint.pos}&travelmode=transit`;
-            document.getElementById('go-link').href = url;
-            document.getElementById('go-link').style.display = 'block';
-        }
-    }
-
-    function focusSpot(spotName) {
-        var target = spotsData.find(s => s.景點 === spotName);
+    function focusSpot(name) {
+        var target = allData.find(s => s.景點 === name);
         if (target) {
-            highlightLayer.clearLayers();
-            map.flyTo([target.緯度, target.經度], 17);
-            L.circle([target.緯度, target.經度], {
-                radius: 100, color: '#e74c3c', weight: 2, fillOpacity: 0.2
-            }).addTo(highlightLayer);
-            allMarkers[spotName].openPopup();
-            // 行動裝置點擊清單後自動收合
-            if (window.innerWidth < 768) toggleSidebar();
+            map.flyTo([target.緯度, target.經度], 16);
+            allMarkers[name].openPopup();
+            if (window.innerWidth < 600) toggleSidebar();
         }
     }
 </script>
@@ -205,6 +163,5 @@ HTML_TEMPLATE = r"""
 """
 
 if __name__ == '__main__':
-    # 網頁版關鍵設定：host='0.0.0.0' 允許外部訪問，port 由環境變數決定（相容 Render）
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    app.run(host='0.0.0.0', port=port)
